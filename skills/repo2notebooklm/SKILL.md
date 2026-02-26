@@ -46,9 +46,20 @@ Use this skill to run the local `repo2nlm` tool end-to-end.
 - `out-<name>/manifest.json`
 - `out-<name>/graph.json`
 - `out-<name>/stats.json`
+- `out-<name>/upload_map.json` (generated after `upload`)
 
 ## Notes
 
 - `ingest` supports `--branch`, `--commit`, `--include`, `--exclude`, `--max-file-kb`
 - `update` compares with existing `manifest.json` and reports changed/deleted files
 - If upload fails, verify NotebookLM login with `notebooklm login`
+- `upload` includes auto-recovery behavior:
+  - auto-split large markdown files to `*.partNN.md`
+  - clean stale/errored duplicate sources before retry
+  - reconcile local expected titles vs remote ready sources
+- `upload_map.json` is the audit artifact for upload correctness:
+  - `items[].original`: original local markdown file
+  - `items[].uploaded_titles`: actual source titles uploaded to NotebookLM
+  - `items[].split`: whether file was split
+  - `items[].remote_sources[]`: remote `id/status/type/created_at`
+  - acceptance rule: `missing_titles` must be empty
