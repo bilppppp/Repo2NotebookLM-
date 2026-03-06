@@ -8,6 +8,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+_AUTO_LARGE_FILE_THRESHOLD = 80
+_AUTO_LARGE_TOTAL_BYTES_THRESHOLD = 64 * 1024 * 1024
+_AUTO_LARGE_BATCH_SIZE = 20
+
 
 def _run(args: list[str]) -> tuple[int, str, str]:
     proc = subprocess.run(args, capture_output=True, text=True)
@@ -106,7 +110,45 @@ def _is_split_title(title: str) -> bool:
     return bool(re.search(r"\.part\d{2}\.md$", title))
 
 
-def upload_to_notebooklm(out_dir: Path, notebook: str, create_if_missing: bool = False) -> None:
+def _chunked(items: list[Path], chunk_size: int) -> list[list[Path]]:
+    if chunk_size <= 0:
+        return [items]
+    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def _choose_upload_strategy(upload_sources: list[Path]) -> dict[str, int | str]:
+    total_bytes = sum(p.stat().st_size for p in upload_sources)
+    file_count = len(upload_sources)
+    large = (
+        file_count >= _AUTO_LARGE_FILE_THRESHOLD
+        or total_bytes >= _AUTO_LARGE_TOTAL_BYTES_THRESHOLD
+    )
+    return {
+        "mode": "large-auto" if large else "standard",
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "batch_size": _AUTO_LARGE_BATCH_SIZE if large else file_count,
+    }
+
+
+def _read_local_commit(out_dir: Path) -> str | None:
+    stats_file = out_dir / "stats.json"
+    if not stats_file.exists():
+        return None
+    try:
+        payload = json.loads(stats_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    commit = payload.get("commit")
+    return str(commit) if commit else None
+
+
+def upload_to_notebooklm(
+    out_dir: Path,
+    notebook: str,
+    create_if_missing: bool = False,
+    replace_existing: bool = False,
+) -> None:
     cli = shutil.which("notebooklm")
     if not cli:
         raise RuntimeError("notebooklm CLI not found. Activate venv and install notebooklm-py.")
@@ -123,7 +165,9 @@ def upload_to_notebooklm(out_dir: Path, notebook: str, create_if_missing: bool =
 
     with tempfile.TemporaryDirectory(prefix="repo2nlm_upload_") as td:
         upload_sources, purge_titles = _prepare_sources_for_upload(sources, Path(td))
+        strategy = _choose_upload_strategy(upload_sources)
         expected_titles = {p.name for p in upload_sources}
+        local_commit = _read_local_commit(out_dir)
         by_original: dict[str, list[str]] = {}
         source_name_set = {s.name for s in sources}
         for p in upload_sources:
@@ -142,26 +186,54 @@ def upload_to_notebooklm(out_dir: Path, notebook: str, create_if_missing: bool =
             if _is_split_title(str(r.get("title", ""))) and r.get("title") not in expected_titles:
                 _delete_source(cli, notebook_id, str(r["id"]))
 
-        # Upload/recover per source.
-        for src in upload_sources:
-            title = src.name
+        # Upload/recover per source (batch mode for large projects).
+        batches = _chunked(upload_sources, int(strategy["batch_size"]))
+        for batch in batches:
             remote = _list_sources(cli, notebook_id)
-            same_title = [r for r in remote if r.get("title") == title]
-            if any(r.get("status") == "ready" for r in same_title):
-                for r in same_title:
-                    if r.get("status") != "ready":
-                        _delete_source(cli, notebook_id, str(r["id"]))
-                continue
-            for r in same_title:
-                _delete_source(cli, notebook_id, str(r["id"]))
+            by_title: dict[str, list[dict[str, Any]]] = {}
+            for r in remote:
+                by_title.setdefault(str(r.get("title")), []).append(r)
 
-            ok = False
-            for _ in range(3):
-                if _upload_and_wait(cli, notebook_id, src):
-                    ok = True
-                    break
-            if not ok:
-                raise RuntimeError(f"failed to upload source {src}")
+            pending_titles: list[str] = []
+            for src in batch:
+                title = src.name
+                same_title = by_title.get(title, [])
+                if replace_existing:
+                    for r in same_title:
+                        _delete_source(cli, notebook_id, str(r["id"]))
+                elif any(r.get("status") == "ready" for r in same_title):
+                    for r in same_title:
+                        if r.get("status") != "ready":
+                            _delete_source(cli, notebook_id, str(r["id"]))
+                    continue
+                else:
+                    for r in same_title:
+                        _delete_source(cli, notebook_id, str(r["id"]))
+
+                ok = False
+                for _ in range(3):
+                    if _upload_and_wait(cli, notebook_id, src):
+                        ok = True
+                        break
+                if not ok:
+                    raise RuntimeError(f"failed to upload source {src}")
+                pending_titles.append(title)
+
+            if not pending_titles:
+                continue
+
+            # For large uploads, checkpoint readiness per batch to avoid late surprises.
+            remote = _list_sources(cli, notebook_id)
+            by_title = {}
+            for r in remote:
+                by_title.setdefault(str(r.get("title")), []).append(r)
+            for title in pending_titles:
+                rows = by_title.get(title, [])
+                if any(r.get("status") == "ready" for r in rows):
+                    continue
+                for r in rows:
+                    if r.get("status") == "processing":
+                        _run([cli, "source", "wait", str(r["id"]), "-n", notebook_id, "--timeout", "300"])
 
         # Reconciliation: ensure every expected source exists and is ready.
         remote = _list_sources(cli, notebook_id)
@@ -215,6 +287,12 @@ def upload_to_notebooklm(out_dir: Path, notebook: str, create_if_missing: bool =
         upload_map = {
             "notebook_id": notebook_id,
             "requested_notebook": notebook,
+            "local_commit": local_commit,
+            "replace_existing": replace_existing,
+            "upload_mode": strategy["mode"],
+            "batch_size": strategy["batch_size"],
+            "file_count": strategy["file_count"],
+            "total_bytes": strategy["total_bytes"],
             "expected_titles_count": len(expected_titles),
             "ready_titles_count": len(ready_titles),
             "missing_titles": missing,
