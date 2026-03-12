@@ -1,5 +1,7 @@
 # repo2nlm
 
+[中文](README.md) | [English](README.en.md)
+
 Convert GitHub repositories into NotebookLM-ready structured learning material.
 
 Outputs:

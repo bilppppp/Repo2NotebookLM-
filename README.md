@@ -1,5 +1,7 @@
 # repo2nlm
 
+[中文](README.md) | [English](README.en.md)
+
 把 GitHub 仓库转换为 NotebookLM 结构化学习材料，输出：
 
 - `RepoBook/`（代码与文档正文）
