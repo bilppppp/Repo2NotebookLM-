@@ -1,6 +1,6 @@
 ---
 name: repo2notebooklm
-description: Convert a Git repository into NotebookLM-ready structured sources (RepoBook + GraphBook), then optionally upload to NotebookLM. Use when user asks to import/ingest/update a repo into NotebookLM.
+description: Use when the user wants to ingest one or more code repositories into NotebookLM, refresh existing repo outputs, merge multiple repos into one notebook, or verify uploaded sources against local repo2nlm artifacts.
 ---
 
 # repo2notebooklm
@@ -12,6 +12,9 @@ Use this skill to run the local `repo2nlm` tool end-to-end.
 - User asks to ingest a GitHub repo to NotebookLM
 - User asks to generate RepoBook/GraphBook from code repositories
 - User asks to update previously generated outputs incrementally
+- User wants to upload multiple `out-*` directories into one NotebookLM notebook
+- User wants a cross-repo NotebookLM workspace with a generated navigation/index source
+- User wants exact upload verification using `upload_map.json`
 
 ## Preconditions
 
@@ -45,6 +48,16 @@ Use this skill to run the local `repo2nlm` tool end-to-end.
 ./repo2nlm upload ./out-foo ./out-bar --notebook "<name_or_id>" --create-if-missing
 ```
 
+3a. Verify upload correctness (recommended)
+
+```bash
+# 单仓：检查当前 out 目录的 upload_map.json
+jq '{requested_notebook, expected_titles_count, ready_titles_count, missing_titles}' ./out-<name>/upload_map.json
+
+# 多仓合并：把多个 upload_map.json 的 uploaded_titles 合集，与远端 source list 对账
+notebooklm source list -n <notebook_id> --json
+```
+
 4. Cleanup local outputs (optional)
 
 ```bash
@@ -60,6 +73,7 @@ bash skills/repo2notebooklm/scripts/cleanup_out.sh ./out-<name> --audit-only
 - `out-<name>/graph.json`
 - `out-<name>/stats.json`
 - `out-<name>/upload_map.json` (generated after `upload`)
+- Multi-repo upload only: remote `WorkspaceIndex.md`
 
 ## Notes
 
@@ -80,3 +94,7 @@ bash skills/repo2notebooklm/scripts/cleanup_out.sh ./out-<name> --audit-only
   - `items[].split`: whether file was split
   - `items[].remote_sources[]`: remote `id/status/type/created_at`
   - acceptance rule: `missing_titles` must be empty
+- For a merged notebook, the strict correctness rule is:
+  - union all `items[].uploaded_titles` across the relevant `upload_map.json` files
+  - compare that union with `notebooklm source list -n <notebook_id> --json`
+  - acceptance rule: no missing titles, no extra titles, all remote sources are `ready`
