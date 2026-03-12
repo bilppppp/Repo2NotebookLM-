@@ -39,6 +39,10 @@ Use this skill to run the local `repo2nlm` tool end-to-end.
 ./repo2nlm upload ./out-<name> --notebook "<name_or_id>" --create-if-missing
 # 强制替换同名远端 source，避免保留旧内容
 ./repo2nlm upload ./out-<name> --notebook "<name_or_id>" --replace-existing
+
+# 多个 repo 合并进同一个 notebook 时，自动使用 <repo>__<filename>.md 命名空间
+# 并生成一个 WorkspaceIndex.md 作为跨 repo 导航入口
+./repo2nlm upload ./out-foo ./out-bar --notebook "<name_or_id>" --create-if-missing
 ```
 
 4. Cleanup local outputs (optional)
@@ -67,6 +71,8 @@ bash skills/repo2notebooklm/scripts/cleanup_out.sh ./out-<name> --audit-only
   - clean stale/errored duplicate sources before retry
   - auto-switch to `large-auto` batching mode for very large uploads
   - reconcile local expected titles vs remote ready sources
+  - when uploading multiple `out-*` directories together, namespace titles as `<repo>__<filename>.md`
+  - generate `WorkspaceIndex.md` to summarize the combined repositories and provide cross-repo query hints
 - `upload_map.json` is the audit artifact for upload correctness:
   - `upload_mode` / `batch_size` / `file_count` / `total_bytes`: upload strategy evidence
   - `items[].original`: original local markdown file

@@ -115,12 +115,13 @@ def cmd_update(args: argparse.Namespace) -> int:
 
 def cmd_upload(args: argparse.Namespace) -> int:
     upload_to_notebooklm(
-        Path(args.out),
+        [Path(out) for out in args.out],
         args.notebook,
         create_if_missing=args.create_if_missing,
         replace_existing=args.replace_existing,
     )
-    print(f"uploaded markdown sources from {args.out} to notebook {args.notebook}")
+    joined_outs = ", ".join(args.out)
+    print(f"uploaded markdown sources from {joined_outs} to notebook {args.notebook}")
     return 0
 
 
@@ -147,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.set_defaults(func=cmd_update)
 
     p_upload = sub.add_parser("upload", help="upload generated markdown to notebooklm")
-    p_upload.add_argument("out")
+    p_upload.add_argument("out", nargs="+")
     p_upload.add_argument("--notebook", required=True, help="notebook id or name")
     p_upload.add_argument("--create-if-missing", action="store_true")
     p_upload.add_argument(

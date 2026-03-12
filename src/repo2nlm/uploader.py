@@ -5,12 +5,21 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _AUTO_LARGE_FILE_THRESHOLD = 80
 _AUTO_LARGE_TOTAL_BYTES_THRESHOLD = 64 * 1024 * 1024
 _AUTO_LARGE_BATCH_SIZE = 20
+
+
+@dataclass(frozen=True)
+class UploadSource:
+    out_dir: Path
+    namespace: str
+    original_title: str
+    upload_path: Path
 
 
 def _run(args: list[str]) -> tuple[int, str, str]:
@@ -47,6 +56,7 @@ def _resolve_notebook_id(cli: str, notebook: str, create_if_missing: bool) -> st
 
 
 def _split_markdown(src: Path, dst_dir: Path, chunk_bytes: int = 2 * 1024 * 1024) -> list[Path]:
+    dst_dir.mkdir(parents=True, exist_ok=True)
     text = src.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines(keepends=True)
     parts: list[str] = []
@@ -75,16 +85,159 @@ def _split_markdown(src: Path, dst_dir: Path, chunk_bytes: int = 2 * 1024 * 1024
     return out
 
 
-def _prepare_sources_for_upload(sources: list[Path], tmp_dir: Path, max_bytes: int = 4 * 1024 * 1024) -> tuple[list[Path], set[str]]:
-    upload_paths: list[Path] = []
+def _namespace_for_out_dir(out_dir: Path) -> str:
+    name = out_dir.name
+    if name.startswith("out-") and len(name) > 4:
+        return name[4:]
+    return name
+
+
+def _source_title(src: Path, namespace: str | None) -> str:
+    if not namespace:
+        return src.name
+    return f"{namespace}__{src.name}"
+
+
+def _copy_with_title(src: Path, staged_dir: Path, title: str) -> Path:
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    dst = staged_dir / title
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _iter_markdown_sources(out_dir: Path) -> list[Path]:
+    sources = sorted((out_dir / "RepoBook").glob("*.md"))
+    graphbook = out_dir / "GraphBook.md"
+    if graphbook.exists():
+        sources.append(graphbook)
+    return sources
+
+
+def _read_stats(out_dir: Path) -> dict[str, Any]:
+    stats_file = out_dir / "stats.json"
+    if not stats_file.exists():
+        return {}
+    try:
+        return json.loads(stats_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_workspace_index(out_dirs: list[Path], staged_dir: Path) -> Path:
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Workspace Index",
+        "",
+        "This source summarizes the repositories uploaded together into this NotebookLM notebook.",
+        "",
+        "## Repositories",
+        "",
+    ]
+    repo_names: list[str] = []
+    for out_dir in out_dirs:
+        stats = _read_stats(out_dir)
+        repo_name = _namespace_for_out_dir(out_dir)
+        repo_names.append(repo_name)
+        outputs = stats.get("outputs", {}) if isinstance(stats, dict) else {}
+        repobook_files = outputs.get("repobook_files", []) if isinstance(outputs, dict) else []
+        lines.extend(
+            [
+                f"### {repo_name}",
+                "",
+                f"- Repo: `{stats.get('repo', '(unknown)')}`",
+                f"- Branch: `{stats.get('branch', '(unknown)')}`",
+                f"- Commit: `{stats.get('commit', '(unknown)')}`",
+                f"- Files scanned: `{stats.get('file_count', '(unknown)')}`",
+                f"- Text files: `{stats.get('text_file_count', '(unknown)')}`",
+                f"- RepoBook chapters: `{len(repobook_files)}`",
+                f"- Graph source title: `{repo_name}__GraphBook.md`",
+                "",
+                "Suggested source title prefix:",
+                "",
+                f"- `{repo_name}__...`",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Cross-Repo Questions",
+            "",
+            f"- Compare architecture and abstractions across: {', '.join(f'`{name}`' for name in repo_names)}",
+            f"- Identify similar modules or responsibilities across: {', '.join(f'`{name}`' for name in repo_names)}",
+            f"- Explain how implementation style differs between: {', '.join(f'`{name}`' for name in repo_names)}",
+            "",
+            "## Query Tips",
+            "",
+            "- Include the repo prefix in your question when you want a specific repository.",
+            "- Ask for contrasts explicitly when you want NotebookLM to compare two or more repositories.",
+            "- Start from `WorkspaceIndex.md` when you need a high-level map of the combined notebook.",
+            "",
+        ]
+    )
+    index_path = staged_dir / "WorkspaceIndex.md"
+    index_path.write_text("\n".join(lines), encoding="utf-8")
+    return index_path
+
+
+def _collect_upload_source_specs(out_dirs: list[Path], staged_dir: Path) -> list[UploadSource]:
+    multi_out = len(out_dirs) > 1
+    specs: list[UploadSource] = []
+    if multi_out:
+        index_path = _write_workspace_index(out_dirs, staged_dir)
+        specs.append(
+            UploadSource(
+                out_dir=out_dirs[0],
+                namespace="",
+                original_title=index_path.name,
+                upload_path=index_path,
+            )
+        )
+    for out_dir in out_dirs:
+        namespace = _namespace_for_out_dir(out_dir) if multi_out else ""
+        for src in _iter_markdown_sources(out_dir):
+            upload_path = src if not multi_out else _copy_with_title(
+                src,
+                staged_dir,
+                _source_title(src, namespace),
+            )
+            specs.append(
+                UploadSource(
+                    out_dir=out_dir,
+                    namespace=namespace,
+                    original_title=src.name,
+                    upload_path=upload_path,
+                )
+            )
+    return sorted(specs, key=lambda spec: spec.upload_path.name)
+
+
+def _collect_upload_sources(out_dirs: list[Path], staged_dir: Path) -> list[Path]:
+    return [spec.upload_path for spec in _collect_upload_source_specs(out_dirs, staged_dir)]
+
+
+def _prepare_sources_for_upload(
+    sources: list[UploadSource],
+    tmp_dir: Path,
+    max_bytes: int = 4 * 1024 * 1024,
+) -> tuple[list[UploadSource], set[str]]:
+    upload_specs: list[UploadSource] = []
     purge_titles: set[str] = set()
-    for src in sources:
+    for spec in sources:
+        src = spec.upload_path
         if src.stat().st_size <= max_bytes:
-            upload_paths.append(src)
+            upload_specs.append(spec)
             continue
         purge_titles.add(src.name)
-        upload_paths.extend(_split_markdown(src, tmp_dir))
-    return upload_paths, purge_titles
+        for split_path in _split_markdown(src, tmp_dir):
+            upload_specs.append(
+                UploadSource(
+                    out_dir=spec.out_dir,
+                    namespace=spec.namespace,
+                    original_title=spec.original_title,
+                    upload_path=split_path,
+                )
+            )
+    return upload_specs, purge_titles
 
 
 def _list_sources(cli: str, notebook_id: str) -> list[dict[str, Any]]:
@@ -143,8 +296,63 @@ def _read_local_commit(out_dir: Path) -> str | None:
     return str(commit) if commit else None
 
 
+def _build_upload_maps(
+    out_dirs: list[Path],
+    notebook_id: str,
+    notebook: str,
+    replace_existing: bool,
+    strategy: dict[str, int | str],
+    ready_titles: set[str | None],
+    missing: list[str],
+    by_title: dict[str, list[dict[str, Any]]],
+    by_original: dict[Path, dict[str, list[str]]],
+    upload_specs: list[UploadSource],
+) -> None:
+    for out_dir in out_dirs:
+        source_items: list[dict[str, Any]] = []
+        original_map = by_original.get(out_dir, {})
+        out_upload_specs = [spec for spec in upload_specs if spec.out_dir == out_dir]
+        expected_titles = {spec.upload_path.name for spec in out_upload_specs}
+        for original in sorted(original_map):
+            uploaded_titles = sorted(original_map[original])
+            remote_sources: list[dict[str, Any]] = []
+            for title in uploaded_titles:
+                remote_sources.extend(by_title.get(title, []))
+            source_items.append(
+                {
+                    "original": original,
+                    "uploaded_titles": uploaded_titles,
+                    "split": len(uploaded_titles) > 1,
+                    "remote_sources": remote_sources,
+                }
+            )
+
+        upload_map = {
+            "notebook_id": notebook_id,
+            "requested_notebook": notebook,
+            "local_commit": _read_local_commit(out_dir),
+            "replace_existing": replace_existing,
+            "upload_mode": strategy["mode"],
+            "batch_size": strategy["batch_size"],
+            "file_count": len(expected_titles),
+            "total_bytes": sum(spec.upload_path.stat().st_size for spec in out_upload_specs),
+            "expected_titles_count": len(expected_titles),
+            "ready_titles_count": len(
+                {title for title in expected_titles if title in ready_titles}
+            ),
+            "missing_titles": sorted(
+                title for title in expected_titles if title in missing
+            ),
+            "items": source_items,
+        }
+        (out_dir / "upload_map.json").write_text(
+            json.dumps(upload_map, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
 def upload_to_notebooklm(
-    out_dir: Path,
+    out_dirs: list[Path],
     notebook: str,
     create_if_missing: bool = False,
     replace_existing: bool = False,
@@ -155,27 +363,25 @@ def upload_to_notebooklm(
 
     notebook_id = _resolve_notebook_id(cli, notebook, create_if_missing=create_if_missing)
 
-    sources = sorted((out_dir / "RepoBook").glob("*.md"))
-    graphbook = out_dir / "GraphBook.md"
-    if graphbook.exists():
-        sources.append(graphbook)
-
-    if not sources:
-        raise RuntimeError("no markdown sources found under output directory")
-
     with tempfile.TemporaryDirectory(prefix="repo2nlm_upload_") as td:
-        upload_sources, purge_titles = _prepare_sources_for_upload(sources, Path(td))
+        raw_sources = _collect_upload_source_specs(out_dirs, Path(td) / "staged")
+        if not raw_sources:
+            raise RuntimeError("no markdown sources found under output directories")
+
+        upload_specs, purge_titles = _prepare_sources_for_upload(raw_sources, Path(td) / "split")
+        upload_sources = [spec.upload_path for spec in upload_specs]
         strategy = _choose_upload_strategy(upload_sources)
-        expected_titles = {p.name for p in upload_sources}
-        local_commit = _read_local_commit(out_dir)
-        by_original: dict[str, list[str]] = {}
-        source_name_set = {s.name for s in sources}
-        for p in upload_sources:
-            if p.name in source_name_set:
-                by_original[p.name] = [p.name]
-            else:
-                prefix = p.name.split(".part", 1)[0] + ".md"
-                by_original.setdefault(prefix, []).append(p.name)
+        expected_titles = {spec.upload_path.name for spec in upload_specs}
+        by_original: dict[Path, dict[str, list[str]]] = {}
+        for spec in upload_specs:
+            original_key = (
+                f"{spec.namespace}/{spec.original_title}"
+                if spec.namespace
+                else spec.original_title
+            )
+            by_original.setdefault(spec.out_dir, {}).setdefault(original_key, []).append(
+                spec.upload_path.name
+            )
 
         # Remove stale errored files that are replaced by split chunks.
         remote = _list_sources(cli, notebook_id)
@@ -187,7 +393,7 @@ def upload_to_notebooklm(
                 _delete_source(cli, notebook_id, str(r["id"]))
 
         # Upload/recover per source (batch mode for large projects).
-        batches = _chunked(upload_sources, int(strategy["batch_size"]))
+        batches = _chunked(upload_specs, int(strategy["batch_size"]))
         for batch in batches:
             remote = _list_sources(cli, notebook_id)
             by_title: dict[str, list[dict[str, Any]]] = {}
@@ -195,7 +401,8 @@ def upload_to_notebooklm(
                 by_title.setdefault(str(r.get("title")), []).append(r)
 
             pending_titles: list[str] = []
-            for src in batch:
+            for spec in batch:
+                src = spec.upload_path
                 title = src.name
                 same_title = by_title.get(title, [])
                 if replace_existing:
@@ -269,36 +476,15 @@ def upload_to_notebooklm(
                 }
             )
 
-        mapping_items: list[dict[str, Any]] = []
-        for original in sorted(by_original):
-            uploaded_titles = sorted(by_original[original])
-            remote_sources: list[dict[str, Any]] = []
-            for t in uploaded_titles:
-                remote_sources.extend(by_title.get(t, []))
-            mapping_items.append(
-                {
-                    "original": original,
-                    "uploaded_titles": uploaded_titles,
-                    "split": len(uploaded_titles) > 1,
-                    "remote_sources": remote_sources,
-                }
-            )
-
-        upload_map = {
-            "notebook_id": notebook_id,
-            "requested_notebook": notebook,
-            "local_commit": local_commit,
-            "replace_existing": replace_existing,
-            "upload_mode": strategy["mode"],
-            "batch_size": strategy["batch_size"],
-            "file_count": strategy["file_count"],
-            "total_bytes": strategy["total_bytes"],
-            "expected_titles_count": len(expected_titles),
-            "ready_titles_count": len(ready_titles),
-            "missing_titles": missing,
-            "items": mapping_items,
-        }
-        (out_dir / "upload_map.json").write_text(
-            json.dumps(upload_map, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        _build_upload_maps(
+            out_dirs=out_dirs,
+            notebook_id=notebook_id,
+            notebook=notebook,
+            replace_existing=replace_existing,
+            strategy=strategy,
+            ready_titles=ready_titles,
+            missing=missing,
+            by_title=by_title,
+            by_original=by_original,
+            upload_specs=upload_specs,
         )

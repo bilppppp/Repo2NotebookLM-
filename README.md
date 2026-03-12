@@ -32,6 +32,12 @@ repo2nlm update <repo_url> --out ./out
 repo2nlm upload ./out --notebook <name_or_id> --create-if-missing
 # 完整刷新远端同名 source（避免保留旧内容）
 repo2nlm upload ./out --notebook <name_or_id> --replace-existing
+
+# 把多个仓库输出合并上传到同一个 notebook
+# 会自动把远端 source 标题改成 <repo>__<filename>.md 以避免冲突
+# 同时会生成一个 WorkspaceIndex.md，便于跨 repo 导航和对比
+repo2nlm upload ./out-mlflow ./out-dispatch ./out-hermes-agent \
+  --notebook <name_or_id> --create-if-missing
 ```
 
 ## 说明
@@ -39,6 +45,8 @@ repo2nlm upload ./out --notebook <name_or_id> --replace-existing
 - `update` 会读取旧 `manifest.json` 计算变更文件，并重建输出。
 - `upload` 依赖 `notebooklm` CLI（由 `notebooklm-py` 安装提供）。
 - 如果希望 NotebookLM 中内容与本地 `out/` 严格一致，使用 `--replace-existing` 强制替换同名 source。
+- `upload` 支持一次传入多个 `out-*` 目录；当目录数量大于 1 时，会自动使用 `out-` 后缀作为 repo 命名空间，把上传标题写成 `<repo>__<filename>.md`，避免不同 repo 的 `00_overview.md` / `GraphBook.md` 互相覆盖。
+- 多目录上传时还会额外生成一个 `WorkspaceIndex.md`，汇总 repo 元信息、GraphBook 入口和跨 repo 提问建议。
 - 对超大仓库会自动切换为分批上传+分批等待（无须额外参数），减少超长上传过程中的遗漏风险。
 
 ## 上传后是否保留本地 out 目录
