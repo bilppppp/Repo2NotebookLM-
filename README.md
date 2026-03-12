@@ -10,6 +10,16 @@
 - `graph.json`（依赖图数据）
 - `stats.json`（统计与增量变更）
 
+## 给 AI Agent 安装
+
+可以直接把这句话发给你的 AI agent：
+
+```text
+帮我安装 repo2nlm：https://raw.githubusercontent.com/bilppppp/Repo2NotebookLM-/main/install.md
+```
+
+安装说明文档：[`install.md`](install.md)
+
 ## 环境准备（venv）
 
 ```bash

@@ -12,6 +12,16 @@ Outputs:
 - `graph.json` for dependency graph data
 - `stats.json` for scan and update statistics
 
+## Install for AI Agents
+
+You can send this directly to your AI agent:
+
+```text
+Help me install repo2nlm: https://raw.githubusercontent.com/bilppppp/Repo2NotebookLM-/main/install.md
+```
+
+Installation document: [`install.md`](install.md)
+
 ## Environment Setup
 
 ```bash
